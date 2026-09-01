@@ -8,3 +8,12 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: observability-grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
