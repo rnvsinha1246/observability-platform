@@ -1,0 +1,44 @@
+groups:
+  - name: observability-alerts
+    rules:
+
+      - alert: HighErrorBudgetBurn
+        expr: |
+          (
+            (
+              sum(rate(http_requests_total{endpoint="/api",status!~"2.."}[1h]))
+              /
+              sum(rate(http_requests_total{endpoint="/api"}[1h]))
+            ) / 0.001
+          ) > 14.4
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error budget burn detected"
+          description: "Availability error budget is burning faster than 14.4x."
+
+      - alert: ElevatedErrorBudgetBurn
+        expr: |
+          (
+            (
+              sum(rate(http_requests_total{endpoint="/api",status!~"2.."}[6h]))
+              /
+              sum(rate(http_requests_total{endpoint="/api"}[6h]))
+            ) / 0.001
+          ) > 6
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated error budget burn detected"
+          description: "Availability error budget is burning faster than 6x."
+
+      - alert: ObservabilityAPIUnavailable
+        expr: up{job="observability-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Observability API is unavailable"
+          description: "Prometheus cannot scrape the observability API."
