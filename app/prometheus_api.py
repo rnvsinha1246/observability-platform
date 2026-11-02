@@ -1,8 +1,9 @@
-
+import math
 import requests
 
 
 PROMETHEUS_URL = "http://localhost:9090"
+
 
 
 def query_prometheus(query: str) -> float | None:
@@ -24,4 +25,9 @@ def query_prometheus(query: str) -> float | None:
     if not data:
         return None
 
-    return float(data[0]["value"][1])
+    value = float(data[0]["value"][1])
+
+    if not math.isfinite(value):
+        return None
+
+    return value
