@@ -15,10 +15,8 @@ from slo import (
 from metrics import REQUEST_COUNT, REQUEST_LATENCY
 
 from slo import (
-    SLO_TARGET,
     calculate_availability,
-    calculate_error_budget,
-    calculate_budget_consumed
+    calculate_error_budget
 )
 
 
@@ -106,71 +104,170 @@ def metrics():
 
 
 
+
 @app.get("/slo")
 def slo():
+    window = SLO_CONFIG["evaluation_window"]
+    latency_threshold = SLO_CONFIG["latency"]["threshold_seconds"]
+
     queries = {
-        "availability": '''
-            sum(rate(http_requests_total{endpoint="/api",status=~"2.."}[5m]))
-            /
-            sum(rate(http_requests_total{endpoint="/api"}[5m]))
+        "total_requests": f'''
+            sum(increase(
+                http_requests_total{{endpoint="/api"}}[{window}]
+            ))
         ''',
 
-        "latency": '''
-            sum(rate(http_request_duration_seconds_bucket{endpoint="/api",le="0.3"}[5m]))
-            /
-            sum(rate(http_request_duration_seconds_count{endpoint="/api"}[5m]))
+        "successful_requests": f'''
+            sum(increase(
+                http_requests_total{{endpoint="/api",status=~"2.."}}[{window}]
+            )) or vector(0)
         ''',
 
-        "error_rate": '''
-            sum(rate(http_requests_total{endpoint="/api",status=~"5.."}[5m]))
-            /
-            sum(rate(http_requests_total{endpoint="/api"}[5m]))
+        "failed_requests": f'''
+            sum(increase(
+                http_requests_total{{endpoint="/api",status=~"5.."}}[{window}]
+            )) or vector(0)
+        ''',
+
+        "fast_requests": f'''
+            sum(increase(
+                http_request_duration_seconds_bucket{{
+                    endpoint="/api",
+                    le="{latency_threshold}"
+                }}[{window}]
+            )) or vector(0)
         '''
     }
+
+    burn_rate_queries = {}
+
+    for window in SLO_CONFIG["burn_rate_windows"]:
+        burn_rate_queries[window] = {
+            "total": f'''
+                sum(rate(
+                    http_requests_total{{endpoint="/api"}}[{window}]
+                ))
+            ''',
+            "failed": f'''
+                sum(rate(
+                    http_requests_total{{
+                        endpoint="/api",
+                        status!~"2.."
+                    }}[{window}]
+                ))
+            '''
+        }
 
     try:
         measurements = {
             name: query_prometheus(query)
             for name, query in queries.items()
         }
+        burn_rate_measurements = {}
+
+        for window, window_queries in burn_rate_queries.items():
+            burn_rate_measurements[window] = {
+                "total": query_prometheus(window_queries["total"]),
+                "failed": query_prometheus(window_queries["failed"])
+            }
+
     except requests.RequestException as exc:
         raise HTTPException(
             status_code=503,
             detail="Prometheus is unavailable"
         ) from exc
+
     except RuntimeError as exc:
         raise HTTPException(
             status_code=502,
             detail=str(exc)
         ) from exc
 
-    if any(value is None for value in measurements.values()):
+    total = measurements["total_requests"]
+
+    if total is None or total <= 0:
         raise HTTPException(
             status_code=503,
-            detail="Insufficient Prometheus data to evaluate SLIs"
+            detail="Insufficient request data for SLO evaluation"
         )
 
+    successful = measurements["successful_requests"] or 0.0
+    failed = measurements["failed_requests"] or 0.0
+    fast = measurements["fast_requests"] or 0.0
+
+    actual_failed = max(0.0, total - successful)
+
+    availability_sli = successful / total
+    latency_sli = fast / total
+    error_rate_sli = failed / total
+
     availability = evaluate_success_ratio(
-        measurements["availability"],
+        availability_sli,
         SLO_CONFIG["availability"]["target"]
     )
 
     latency = evaluate_success_ratio(
-        measurements["latency"],
+        latency_sli,
         SLO_CONFIG["latency"]["target"]
     )
 
     error_rate = evaluate_error_rate(
-        measurements["error_rate"],
+        error_rate_sli,
         SLO_CONFIG["error_rate"]["maximum"]
+    )
+
+    allowed_error_rate = (
+        1 - SLO_CONFIG["availability"]["target"]
+    )
+
+    burn_rates = {}
+
+    for window, values in burn_rate_measurements.items():
+        window_total = values["total"]
+        window_failed = values["failed"] or 0.0
+
+        if window_total is None or window_total <= 0:
+            burn_rates[window] = None
+            continue
+
+        observed_error_rate = window_failed / window_total
+
+        burn_rates[window] = round(
+            observed_error_rate / allowed_error_rate, 2
+        )
+
+    allowed_failures = (
+        total * (1 - SLO_CONFIG["availability"]["target"])
     )
 
     return {
         "service": "observability-api",
-        "evaluation_window": "5m",
+        "evaluation_window": window,
+
+        "request_volume": {
+            "total": round(total, 2),
+            "successful": round(successful, 2),
+            "failed_5xx": round(failed, 2),
+            "failed_for_availability": round(actual_failed, 2),
+            "within_latency_threshold": round(fast, 2)
+        },
+
+        "error_budget": {
+            "allowed_failures": round(allowed_failures, 2),
+            "actual_failures": round(actual_failed, 2),
+            "burn_rate": availability["burn_rate"],
+            "budget_consumed_percent": availability[
+                "budget_consumed_percent"
+            ],
+            "budget_remaining_percent": availability[
+                "budget_remaining_percent"
+            ]
+        },
+
         "slis": {
             "availability": availability,
             "latency": latency,
             "error_rate": error_rate
-        }
+        },
+        "burn_rates": burn_rates
     }
