@@ -1,10 +1,12 @@
 import math
 import requests
+import os
 
 
-PROMETHEUS_URL = "http://localhost:9090"
-
-
+PROMETHEUS_URL = os.getenv(
+    "PROMETHEUS_URL",
+    "http://localhost:9090"
+)
 
 def query_prometheus(query: str) -> float | None:
     response = requests.get(

@@ -1,5 +1,18 @@
 services:
-
+  
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: observability-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+  
   prometheus:
     image: prom/prometheus:latest
     container_name: observability-prometheus
