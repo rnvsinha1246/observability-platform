@@ -1,0 +1,68 @@
+name: Observability Platform CI-CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy to Minikube
+    runs-on: [self-hosted, macOS, ARM64]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify tools
+        run: |
+          docker version
+          minikube version
+          kubectl version --client
+
+      - name: Build Docker image
+        run: |
+          docker build -t observability-api:${GITHUB_SHA} .
+
+      - name: Test application container
+        run: |
+          docker run -d \
+            --name observability-ci-test \
+            -p 18000:8000 \
+            observability-api:${GITHUB_SHA}
+
+          for i in {1..15}; do
+            if curl -fsS http://localhost:18000/health; then
+              docker rm -f observability-ci-test
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs observability-ci-test
+          docker rm -f observability-ci-test
+          exit 1
+
+      - name: Load image into Minikube
+        run: |
+          minikube image load observability-api:${GITHUB_SHA}
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/
+
+      - name: Update Kubernetes deployment
+        run: |
+          kubectl set image deployment/observability-api \
+            observability-api=observability-api:${GITHUB_SHA}
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/observability-api \
+            --timeout=120s
+          kubectl get pods
+          kubectl get services
